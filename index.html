@@ -1,0 +1,168 @@
+<html>
+	<head>
+		<script type="text/javascript" src="jquery-2.1.4.js"></script>
+	</head>
+	<body>
+
+	<div id="statsConnection"></div>
+
+	<canvas id="cv"></canvas>
+
+	<input type="button" value="U" id="dbgCtrlU"/>
+	<input type="button" value="D" id="dbgCtrlD"/>
+	<input type="button" value="L" id="dbgCtrlL"/>
+	<input type="button" value="R" id="dbgCtrlR"/>
+
+	<script language="javascript">
+
+	var ws = new WebSocket('ws://localhost:45601');
+
+	function setStatus(msg) {
+		$(statsConnection).empty();
+		$(statsConnection).append(msg);
+	}
+
+	setStatus('Connecting to server..');
+
+	dbgCtrlU.onclick = function () {
+		ws.sendjson({
+			subject:   'debug-control-move',
+			tozone:    true,
+			force:     [0.0, 0.0, 1.0, 1.0]
+		});
+	};
+
+	dbgCtrlD.onclick = function () {
+		ws.sendjson({
+			subject:   'debug-control-move',
+			tozone:    true,
+			force:     [0.0, 0.0, -1.0, 1.0]
+		});
+	};
+
+	dbgCtrlL.onclick = function () {
+		ws.sendjson({
+			subject:   'debug-control-move',
+			tozone:    true,
+			force:     [-1.0, 0.0, 0.0, 1.0]
+		});
+	};
+
+	dbgCtrlR.onclick = function () {
+		ws.sendjson({
+			subject:   'debug-control-move',
+			tozone:    true,
+			force:     [1.0, 0.0, 0.0, 1.0]
+		});
+	};
+
+	ws.onopen = function (event) {
+		ws.sendjson({
+			subject:   'login',
+			user:      'machine01',
+			pass:      'nopassneeded'
+		});
+		setStatus('Doing login to index server..');
+	};
+
+	ws.sendjson = function (obj) {
+		ws.send(JSON.stringify(obj));
+	};
+
+	var image_data = [];
+	var image_start_time = 0;
+	var rbps = 0;
+	var cbps = 0;
+
+	var my_uid;
+	var my_mid;
+	var my_zid;
+
+	ws.onmessage = function (event) {
+		var msg = JSON.parse(event.data);
+		console.log('message-in', msg);
+		switch (msg.subject) {
+			case 'zone-change':
+				my_zid = msg.zid;
+				setStatus(['user-id:', my_uid, ' machine-id:', my_mid, ' zone-id:', my_zid, ' zone-address:', msg.address].join(''));
+
+				var zws = new WebSocket(msg.address);
+
+				setStatus('Login ok on index server.. connecting to slave server hosting the zone..');
+
+				if (ws.zws) {
+					/*
+						Drop the old connection and be nice and let the
+						server know so it can go ahead and drop the connection
+						without detecting it through the network transport
+						layer.
+
+						TODO: It is possible that the server may drop us before we
+						      can send this.
+					*/
+					ws.zws.sendjson({
+						subject:     'logout'
+					});
+					ws.zws.close();
+				}
+
+				ws.zws = zws;
+
+				var vis_entities = {};
+
+				zws.sendjson = function (obj) {
+					ws.send(JSON.stringify(obj));
+				};
+
+				zws.onopen = function (event) {
+					setStatus(['user-id:', my_uid, ' machine-id:', my_mid, ' zone-id:', my_zid, ' zone-address:', msg.address, ' INDEX-FEED-GOOD ZONE-FEED-GOOD'].join(''));
+					console.log('got zone channel open');
+				};
+
+				zws.onmessage = function (event) {
+					var msg = JSON.parse(event.data);
+					console.log('msg', msg);
+					switch (msg.subject) {
+						case 'entity-entered':
+							vis_entities[msg.eid] = {
+								label:     msg.label,
+								x:         0.0,
+								y:         0.0,
+								z:         0.0
+							};
+							break;
+						case 'entity-left':
+							delete vis_entities[msg.eid];
+							break;
+						case 'entity-absolute-position-update':
+							var eid = msg.eid;
+							var e = vis_entities[eid];
+
+							e.x = msg.x;
+							e.y = msg.y;
+							e.z = msg.z;
+
+							var ctx = cv.getContext('2d');
+
+							ctx.fillRect(msg.x, msg.y, 10, 10);
+							ctx.fillText(msg.x, msg.y, e.label);
+							break;
+					}
+
+				};
+
+				zws.onerror = function (event) {
+					setStatus('Index login GOOD, but ERROR connecting to the zone host on slave at ' + msg.address);
+				};
+				break;
+			case 'login-accepted':
+				my_uid = msg.uid;
+				my_mid = msg.mid;
+				setStatus(['user-id:', my_uid, ' machine-id:', my_mid, ' zone-id: <waiting>'].join(''));
+				break;
+		}
+	}
+
+	</script>
+	</body>
+</html>
