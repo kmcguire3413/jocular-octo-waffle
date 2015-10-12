@@ -1,5 +1,13 @@
 var fs = require('fs');
 
+
+/*
+  
+  
+
+*/
+
+
 var sqlite3;
 try {
     sqlite3 = require('sqlite3');
@@ -250,27 +258,35 @@ dbjuggle.DatabaseGeneric = function (dbcfg, dbspec) {
                     }
                 });
             },
-            rollback: function () {
+            rollback: function (cb) {
                 if (this.done) {
                     return false;
                 }
-                this.dbi.dbspec.rollback(this);
-                this.commited = false;
+                var self = this;
                 this.done = true;
                 this.dbi.remoutstandingtrans(this);
-                this.dbi.process_pending(true);
-                return false;
+                this.dbi.dbspec.rollback(this, function (err) {
+                  self.commited = false;
+                  self.dbi.process_pending(true);
+                  if (cb) {
+                    cb(err);          
+                  }
+                });
             },
-            commit: function() {
+            commit: function(cb) {
                 if (this.done) {
                     return false;
                 }
-                this.dbi.dbspec.commit(this);
-                this.commited = true;
+                var self = this;
                 this.done = true;
                 this.dbi.remoutstandingtrans(this);
-                this.dbi.process_pending(true);
-                return true;
+                this.dbi.dbspec.commit(this, function (err) {
+                  self.commited = true;
+                  self.dbi.process_pending(true);
+                  if (cb) {
+                    cb(err);
+                  }
+                });
             },
         };
 
@@ -371,23 +387,23 @@ dbjuggle.opendatabase = function (db, cb) {
                         */
                         self.dbi.instance.query('SET autocommit=1');
                     },
-                    rollback: function (self) {
+                    rollback: function (self, cb) {
                         /*
                             Make sure that we unlock all locks we held.
                         */
                         if (self.__mysql_ttl != undefined && self.__mysql_ttl.length > 0) {
                             self.dbi.instance.query('UNLOCK TABLES');
                         }
-                        self.dbi.instance.query('ROLLBACK');
+                        self.dbi.instance.rollback(cb);
                     },
-                    commit: function (self) {
+                    commit: function (self, cb) {
                         /*
                             Make sure that we unlock all locks we held.
                         */
                         if (self.__mysql_ttl != undefined && self.__mysql_ttl.length > 0) {
                             self.dbi.instance.query('UNLOCK TABLES');
                         }
-                        self.dbi.instance.query('COMMIT');
+                        self.dbi.instance.commit(cb);
                     }
                 }
             );
@@ -434,6 +450,7 @@ dbjuggle.opendatabase = function (db, cb) {
             if (sqlite3 == null) {
                 throw new Error('The `sqlite3` node module could not be loaded. Is it installed? `npm install sqlite3`');
             }
+            throw new Error('SQLITE3 not fully implemented');
             var dbi = new dbjuggle.DatabaseGeneric(
                 db,
                 {

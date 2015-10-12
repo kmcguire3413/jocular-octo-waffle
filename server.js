@@ -13,11 +13,78 @@ var dbjuggle = require('./dbjuggle.js');
 var httphandler = require('./httphandler.js');
 var Slave = require('./slave.js');
 var slaveman = require('./slaveman.js');
+var common = require('./common.js');
 
 var hurt = {
 	server: {},
 	util: {}
 };
+
+
+/*
+  This will get the nearest leaf.
+*/
+hurt.util.getPatchTreeLeaf = function(state, zid, x, y, z, mxyz, cb) {
+  var patches = common.BuildPotentialPatchListFromXYZ(x, y, z, mxyz);
+  
+  var tmp = [];
+
+  for (var x = 0; x < patches.length; ++x) {
+    tmp.push(patches[x][0]);
+  }
+
+  var trans = state.db.transaction();
+  trans.add(
+    'SELECT patch_host_id FROM patch_tree WHERE zid = ? AND patch IN (' + tmp.join(',') + ') ORDER BY patch',
+     [zid], 
+     'r'
+  );
+
+  trans.execute(function (t) {
+    var rows = t.results.r.rows;
+    for (var x = 0; x < rows.length; ++x) {
+      if (rows[x].patch_host_id > -1) {
+        cb(rows[x].patch_host_id);
+        return;
+      }
+    }
+    cb(-1);
+  });
+};
+
+/*
+  This will update the patch tree with a leaf.
+*/
+hurt.util.setPatchTreeLeaf = function(state, zid, x, y, z, mxyz, patch_host_id, cb) {
+  var patches = common.BuildPotentialPatchListFromXYZ(x, y, z, mxyz);
+
+  var ct = (new Date()).getTime() / 1000;
+
+  function doit(x) {
+    var cur = patches[x];
+    var leaf;
+    if (x == patches.length - 1) {
+      leaf = patch_host_id;
+    } else {
+      leaf = -1;
+    }
+    var trans = state.db.transaction();
+    trans.add(
+      'INSERT INTO patch_tree (zid, patch, up, last_update, patch_host_id) VALUES (?, ?, ?, ?, ?) ' +
+      'ON DUPLICATE KEY UPDATE up = up | ?, last_update = ?, patch_host_id = ?',
+      [zid, cur[0], cur[1], ct, leaf, cur[1], ct, leaf],
+      'r'
+    );
+    trans.execute(function (t) {
+      if (x + 1 >= patches.length) {
+        cb();
+        return;
+      }
+      doit(x + 1);
+    });
+  }
+  doit(0);
+}; 
 
 /*
 	This will ensure that the zone is hosted and then execute the callback.
@@ -30,80 +97,83 @@ var hurt = {
 	@param(cb).type:      function reference
 	@param(cb).note:      This may be executed sync or async.
 */
-hurt.util.ensureZoneHosted = function (state, zid, cb) {
-	var trans = state.db.transaction();
+hurt.util.checkPatchHosted = function (state, zid, x, y, z, mxyz, cb) {
+  function restart() {
+    hurt.util.ensurePatchHosted(state, zid, x, y, z, mxyz, cb);
+  }
 
-	/*
-		This is going to lock the entire table in MySQL, which is desirable in our
-		usage, however something better is desired.
-	*/
-	trans.locktable('zone_host');
-	trans.add('SELECT address, lastalive, up FROM zone_host WHERE zid = ?', [zid], 'a');
-	trans.execute(function (t) {
-		var rows = t.results.a.rows;
-		/*
-			Beware, the table zone_host is STILL LOCKED.
-		*/
 
-		/*
-			This zone has problems. It is currently locked, but for now
-			just let the zone handle the connection rejection.
-		*/
+  //hurt.util.getPatchTreeLeaf = function(state, zid, x, y, z, mxyz, cb) 
 
-		/*
-			We need to bring this zone online. To do so we need to select a slave
-			that will host the zone. Hopefully some load balancing can be added
-			here, but for now we just select the first slave we have.
-		*/
-		if (rows.length < 1 || rows[0].up == 0) {
-			var trans = state.db.transaction();
-			trans.add('SELECT sid, address, up, locked FROM slaves', [], 'a');
-			trans.execute(function (t) {
-				var rows = t.results.a.rows;
-				console.log('looking for slave to host zone ' + zid);
-				console.log(rows);
-				function __find_slave(x) {
-					for (; x < rows.length; ++x) {
-						if (rows[x].up[0] == 1 && rows[x].locked[0] == 0) {
-							/*
-								We need to request that the slave host this zone,
-								and also get validation that the zone is hosted.
-							*/
-							hurt.slaveman.updateAddress(rows[x].sid, rows[x].address);
-							hurt.slaveman.sendjson(rows[x].sid, {
-								subject:      'host-zone-request',
-								zid:      zid
-							}, null, function (msg) {
-								if (msg.success) {
-									console.log('zone is hosted');
-									cb(true, rows[x].address);
-								} else {
-									__find_slave(x + 1);
-								}
-							});
-							return;
-						}
-					}
-					/*
-						We exhausted all slaves and none could host the zone.
-					*/
-					console.log('slaves exhausted looking for host for zone ' + zid);
-					cb(false);
-				}
+  hurt.util.getPatchTreeLeaf(state, zid, x, y, z, mxyz, function (patch_host_id) {
+    if (patch_host_id == -1) {
+      var trans = state.db.transaction();
+      trans.add(
+        'SELECT address, lastalive FROM patch_host WHERE patch_host_id = ?', 
+        [patch_host_id],
+        'r'
+      );
+      trans.execute(function (t) {
+        var row = t.results.r.rows[0];
+        var ct = (new Date()).getTime();
 
-				__find_slave(0);
-			});
-			return;
-		}
+        if (row) {
+          cb(row.address, ct - row.lastalive);
+        } else {
+          cb(null, 999999, false);
+      });
+    }  
+  });
+}
 
-		/*
-			At this point the zone is hosted. We can return and the lock
-			will be released. I will rollback because I know of nothing
-			that I need to have commit at this point.
-		*/
-		t.rollback();
-		cb(true, rows[0].address);
-	});
+function hurt.util.ensureHostedByPatch(state, zid, x, y, z, mxyz, cb) {
+  hurt.util.checkPatchHosted(state, zid, x, y, z, mxyz, function (address, delta) {
+    if (delta > 60 * 4) {
+      /* Rehost it. */
+      
+      return;
+    }
+  });
+};
+
+function hurt.util.startPatchHosting(state, zid, patches, cb) {
+  var trans = state.db.transaction();
+  trans.add('SELECT up, locked, address, sid FROM slaves', [], 'r');
+  trans.execute(function (t) {
+    var rows = t.results.r.rows;
+    console.log('looking for slave to host zone ' + zid);
+    console.log(rows);
+    function __find_slave(x) {
+      for (; x < rows.length; ++x) {
+        if (rows[x].up[0] == 1 && rows[x].locked[0] == 0) {
+          /*
+            We need to request that the slave host this zone,
+            and also get validation that the zone is hosted.
+          */
+          hurt.slaveman.updateAddress(rows[x].sid, rows[x].address);
+          hurt.slaveman.sendjson(rows[x].sid, {
+            subject:        'host-zone-request',
+            zid:            zid,
+            patch_host_id:  patch_host_id,
+          }, null, function (msg) {
+            if (msg.success) {
+              console.log('zone is hosted');
+              cb(true, rows[x].address);
+            } else {
+              __find_slave(x + 1);
+            }
+          });
+          return;
+        }
+      }
+      /*
+        We exhausted all slaves and none could host the zone.
+      */
+      console.log('slaves exhausted looking for host for zone ' + zid);
+      cb(false);
+    }
+    __find_slave(0);
+  });
 };
 
 hurt.util.ensureZoneCreated = function (state, zid, zstate, cb) {
@@ -121,24 +191,30 @@ hurt.util.ensureZoneCreated = function (state, zid, zstate, cb) {
 
 	zstate = JSON.stringify(zstate);
 
-	trans.locktable('zones');
 	trans.add('SELECT state FROM zones WHERE zid = ?', [zid], 'a');
 	trans.execute(function (t) {
 		var rows = t.results.a.rows;
-
-		if (rows.length < 0) {
+    
+		if (rows.length < 1) {
+      console.log('[index-server] creating zone from scratch', zid);
 			var trans = state.db.transaction();
-			trans.locktable('zones');
-			trans.add('INSERT INTO zones (zid, state) VALUES (?, ?)', [zid, zstate]);
+			trans.add('INSERT INTO zones (zid, state) VALUES (?, ?)', [zid, zstate], 'r');
 			/*
 				Execute as a high priority so we do not have our lock released.
 			*/
-			trans.execute(function () {
+			trans.execute(function (t) {
+        if (t.results.r.err) {
+          console.log('[index-server] Opps.. zone already creating.. repeating ensureZoneCreated');
+          hurt.util.ensureZoneCreated(state, zid, zstate, cb);
+        }
+        console.log('zone created', zstate);
 				trans.commit();
+        cb(zstate);
 			}, true);
+      return;
 		}
 
-		cb();
+		cb(rows[0].state);
 	});
 };
 
@@ -193,6 +269,11 @@ hurt.masterindexstart = function (cfg) {
 				this.send(JSON.stringify(obj));
 			};
 
+      ws.on('error', function (er) {
+        console.log('client dropped by error', state.clients[this.uid]);
+        delete state.clients[this.uid];
+      });
+
 			ws.on('message', function (msg) {
 				try {
 					msg = JSON.parse(msg);
@@ -213,55 +294,45 @@ hurt.masterindexstart = function (cfg) {
 							might even need to make a new machine instance if
 							we can not find one.
 						*/
-						var __disjoint_work1 = function (uid, mid) {
-							var __disjoint_phase1 = function () {
-								console.log('getting machine ' + mid + ' for user ' + uid);
-								var trans = db.transaction();
-								trans.add('SELECT zid FROM machines WHERE mid = ?', [mid], 'a');
-								trans.execute(function (t) {
-									var result = t.results.a.rows;
+						var __disjoint_work1 = function (uid, mid, zid, mstate) {
+							var __disjoint_phase1 = function (mstate, zstate) {
+                /*
+                  We need to ensure that the zone is currently hosted. If it
+                  is not hosted then we need to start an instance of the zone
+                  and wait until it is ready for connections. Then we need to
+                  direct the client to connect to this zone instance.
+                */
+                mstate = JSON.parse(mstate);
+                zstate = JSON.parse(zstate);
 
-									if (result.length < 1) {
-										ws.sendjson({
-											subject: 'login-rejected',
-											desc:    'Oddly.. there is supposed to be a machine that we have no record of..'
-										});
-										return;
-									}
+                console.log('@@@zstate', zstate, zstate.mxyz);
+                hurt.util.ensurePatchHosted(
+                  state, zid,
+                  mstate.x, mstate.y, mstate.z,
+                  zstate.mxyz,
+                  function (isHosted, address) 
+                {
+                  if (isHosted) {
+                    console.log('ACCEPTED');
+                    ws.sendjson({
+                      subject:  'login-accepted',
+                      uid:      uid,
+                      mid:      mid,
+                    });
+                    ws.sendjson({
+                      subject:  'zone-change',
+                      zid:      zid,
+                      address:  address
+                    });
+                    return;
+                  }
 
-									console.log('@@', result.length);
-
-									var zid = result[0].zid;
-
-									/*
-										We need to ensure that the zone is currently hosted. If it
-										is not hosted then we need to start an instance of the zone
-										and wait until it is ready for connections. Then we need to
-										direct the client to connect to this zone instance.
-									*/
-									hurt.util.ensureZoneHosted(state, zid, function (isHosted, address) {
-										if (isHosted) {
-											console.log('ACCEPTED');
-											ws.sendjson({
-												subject:  'login-accepted',
-												uid:      uid,
-												mid:      mid,
-											});
-											ws.sendjson({
-												subject:  'zone-change',
-												zid:      zid,
-												address:  address
-											});
-											return;
-										}
-
-										console.log('REJECTED');
-										ws.sendjson({
-											subject: 'login-rejected',
-											desc:    'Unable to get zone hosted your avatar machine is located in.'
-										});
-									});
-								});
+                  console.log('REJECTED');
+                  ws.sendjson({
+                    subject: 'login-rejected',
+                    desc:    'Unable to get zone hosted your avatar machine is located in.'
+                  });
+                });
 							}
 
 							/*
@@ -275,19 +346,27 @@ hurt.masterindexstart = function (cfg) {
 							//var trans = db.transaction();
 							//trans.add('UPDATE users SET mid = ?', [mid]);
 							//trans.execute(function (t) {
-								hurt.util.ensureZoneCreated(state, 0,
-									/*
-										We can set the initial properties
-										of the zone here, but if we do not
-										the it will happen in the slave or
-										zonehost later.
-									*/
-									null
-								, function () {
-									__disjoint_phase1();
-								});
-							//});
-							//__disjoint_phase1();
+							zstate = hurt.util.ensureZoneCreated(state, zid,
+								/*
+									We can set the initial properties
+									of the zone here, but if we do not
+									the it will happen in the slave or
+									zonehost later.
+								*/
+                {
+                  mxyz:     2883584000,  /* 100 cubic miles (see common.js) */
+                },
+							  function (zstate) {
+                  /*
+                    We also have the zstate that was either from above if it
+                    was created, or what the actual state was. We need the
+                    `mxyz` parameter in order to locate the zone-host that is
+                    hosting the patch the machine is located on.
+                  */
+                console.log('[index-server] zone creaton ensured');
+								__disjoint_phase1(mstate, zstate);
+							});
+              /* [control released back to caller] */
 						}
 						/*
 							TODO: add password hash validation
@@ -328,7 +407,7 @@ hurt.masterindexstart = function (cfg) {
 
 									t.commit();
 
-									__disjoint_work1(uid, mid);
+									__disjoint_work1(uid, mid, 0, mstate);
 								});
 
 								//ws.sendjson({
@@ -338,10 +417,23 @@ hurt.masterindexstart = function (cfg) {
 								return;
 							}
 
-							console.log('user and machine existing');
 							var uid = result[0].uid;
-							var mid = result[0].mid;
-							__disjoint_work1(uid, mid);
+							var mid = result[0].mid; 
+							console.log('user and machine existing', uid, mid, result);
+
+              /* Fetch machine state */
+              var trans = db.transaction();
+              trans.add('SELECT state, zid FROM machines WHERE mid = ?', [mid], 'r');
+              trans.execute(function (t) {
+                if (t.results.r.rows.length < 1) {
+                  ws.sendjson({
+                    subject:    'login-rejected',
+                    desc:       'Internal Error: The machine could not be located.',
+                  });
+                  return;
+                }
+  							__disjoint_work1(uid, mid, t.results.r.rows[0].zid, t.results.r.rows[0].state);
+              });
 						});
 				}
 			});

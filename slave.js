@@ -61,6 +61,7 @@ var slave = function (cfg) {
 		});
 
 		wss.on('connection', function (ws) {
+      console.log('[slave] connection request');
 			ws.uid = state.uid++;
 			ws.isAvatar = false;
 			state.clients[ws.uid] = ws;
@@ -191,22 +192,23 @@ var slave = function (cfg) {
 
                         break;
 					case 'host-zone-request':
-                        /*
-                            We should consider hosting this zone. If we are
-                            too loaded then we need to reject. If this zone
-                            is critical to be hosted then support should be
-                            added to handle that case (forced host).
+            /*
+              We should consider hosting this zone. If we are
+              too loaded then we need to reject. If this zone
+              is critical to be hosted then support should be
+              added to handle that case (forced host).
 
-                            TODO: I am just going to host anything request for
-                                  now.
-                        */
-                        var zid = msg.zid;
-                        state.zhosts[zid] = new zonehost(state, zid, function () {
-							msg.$sendjsonreply({
-								success:        true
-							});
+              TODO: I am just going to host anything request for
+                    now.
+            */
+            var zid = msg.zid;
+            var patches = msg.patches;
+            state.zhosts[zid] = new zonehost(state, zid, patches, function () {
+	  				  msg.$sendjsonreply({
+		  				  success:        true
+						  });
 						});
-                        break;
+            break;
 				}
 			});
 

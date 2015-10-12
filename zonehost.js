@@ -83,7 +83,7 @@ Map3.prototype.get = function (a, b, c) {
     return this.base[a][b][c];
 };
 
-var zonehost = function (slavestate, zid, cb) {
+var zonehost = function (slavestate, zid, patch_host_id, cb) {
     /*
         First we need to query the zone state and then
         determine if we can load it by doing some sanity
@@ -104,48 +104,29 @@ var zonehost = function (slavestate, zid, cb) {
 
     var trans = db.transaction();
     trans.add('SELECT state FROM zones WHERE zid = ?', [zid], 'a');
+    trans.add('SELECT state FROM patch_host WHERE patch_host_id = ?', [patch_host_id], 'b');
     trans.execute(function (t) {
         var rows = t.results.a.rows;
 
-        var state;
+        var zstate, pstate;
+
+        if (t.results.b.rows.length > 0) {
+          pstate = t.results.b.rows[0].state;
+        } else {
+          console.log('[zone-host] I could not find a patch-zone state; aborting.');
+          cb(false);
+          return;
+        }
 
         if (rows.length > 0) {
-            /*
-                This is the last saved state for the zone.
-            */
-            state = JSON.parse(rows[0].state);
+          /*
+            This is the last saved state for the zone.
+          */
+          zstate = JSON.parse(rows[0].state);
         } else {
-            /*
-                In this case let us just make some random zone.
-            */
-            state = {
-                /*
-                    The zones _can_ be bounded. I expect to support them
-                    not being bounded, but for a more realistic planet it
-                    should have a finite size.
-                */
-                cxmax:           Math.floor(Math.random() * 1024),
-                cymax:           Math.floor(Math.random() * 1024),
-                czmax:           Math.floor(Math.random() * 1024),
-                bxmax:           16,
-                bymax:           16,
-                bzmax:           16,
-                /*
-                    We also might want a custom function that determines the
-                    composition of a block during chunk generation. And, it
-                    might shall need to be portable across different instances.
-                */
-                blockgen: function (cx, cy, cz, bx, by, bz) {
-
-                },
-                /*
-                    Here the code to generate a chunk is literally stored in
-                    the state of the zone thus allowing zones to retain the
-                    needed code to make them run.
-                */
-                chunkgen: function (cx, cy, cz) {
-                },
-            };
+          console.log('[zone-host] I could not find a zone state; aborting.');
+          cb(false);
+          return;
         }
 
         self.machines = new EntityVolume();
@@ -153,7 +134,8 @@ var zonehost = function (slavestate, zid, cb) {
         self.zid = zid;
 
         self.slavestate = slavestate;
-        self.state = state;
+        self.zstate = zstate;
+        self.state = pstate;
 
         self.chunks = new Map3();
 
@@ -164,7 +146,7 @@ var zonehost = function (slavestate, zid, cb) {
             TODO: Consider saying we are okay later.
         */
         if (cb) {
-            cb();
+            cb(true);
         } else {
             /*
                 TODO: Might be helpful early in development.
@@ -176,7 +158,7 @@ var zonehost = function (slavestate, zid, cb) {
             Get machines in this zone and load them.
         */
         function loadAllMachines(cb) {
-            console.log('slave is loading all machines');
+            console.log('zone-host is loading all machines');
             var trans = db.transaction();
             trans.add('SELECT mid, state FROM machines WHERE zid = ?', [zid], 'a');
             trans.execute(function (t) {
@@ -238,6 +220,8 @@ zonehost.prototype.tick = function () {
         this.iid_left = {};
         this.iid_enter = {};
     }
+
+    console.log('zone-host tick');
 
     var self = this;
 
