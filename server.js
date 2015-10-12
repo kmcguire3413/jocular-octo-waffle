@@ -22,10 +22,17 @@ var hurt = {
 
 
 /*
-  This will get the nearest leaf.
+  This will get the nearest leaf on the patch tree. It will stop when it
+  either reaches the highest depth, or when it finds the first leaf that
+  has is unused. It will return either the patch host ID found, patch for
+  the coordinates that is unused or used, or both.
 */
 hurt.util.getPatchTreeLeaf = function(state, zid, x, y, z, mxyz, cb) {
   var patches = common.BuildPotentialPatchListFromXYZ(x, y, z, mxyz);
+  hurt.util.getPatchTreeLeafWithPatches(state, zid, patches, cb);
+};
+
+hurt.util.getPatchTreeLeafWithPatches = function (state, zid, patches, cb) {
   
   var tmp = [];
 
@@ -35,7 +42,7 @@ hurt.util.getPatchTreeLeaf = function(state, zid, x, y, z, mxyz, cb) {
 
   var trans = state.db.transaction();
   trans.add(
-    'SELECT patch_host_id FROM patch_tree WHERE zid = ? AND patch IN (' + tmp.join(',') + ') ORDER BY patch',
+    'SELECT patch, patch_host_id, up FROM patch_tree WHERE zid = ? AND patch IN (' + tmp.join(',') + ') ORDER BY patch',
      [zid], 
      'r'
   );
@@ -43,8 +50,8 @@ hurt.util.getPatchTreeLeaf = function(state, zid, x, y, z, mxyz, cb) {
   trans.execute(function (t) {
     var rows = t.results.r.rows;
     for (var x = 0; x < rows.length; ++x) {
-      if (rows[x].patch_host_id > -1) {
-        cb(rows[x].patch_host_id);
+      if (rows[x].patch_host_id > -1 || up == 0) {
+        cb(rows[x].patch_host_id, rows[x].patch);
         return;
       }
     }
@@ -53,11 +60,41 @@ hurt.util.getPatchTreeLeaf = function(state, zid, x, y, z, mxyz, cb) {
 };
 
 /*
+  This allocates the highest unused patch level for each of the specified patches. This is used
+  to allocate patches in order to launch a zone. We do not wish to allocate very small individual
+  patches for each entity so we allocate as large of a patch as possible.
+*/
+hurt.util.setPatchTreeLeafByPatches = function(state, zid, patches, mxyz, patch_host_id, cb) {
+  function doit(i) {
+    var up = common.getPatchesUpFromXYZD(patches[i], mxyz);
+    up.reverse();
+    var r = common.getPatchTreeLeafWithPatches(state, zid, up, function(patch_host_id, highest_patch_unused) {
+      for (var x = 0; x < up.length; ++x) {
+        if (up[x][0] == highest_patch_unused) {
+          up = up.slice(0, x + 1);
+          break;
+        }
+      }
+      hurt.util.setPatchTreeLeafWithPatches(state, zid, up, patch_host_id, function () {
+        if (i + 1 < patches.length) {
+          return doit(i + 1);
+        }
+        cb();
+      }); 
+    });
+  }
+  doit(0);
+};
+
+/*
   This will update the patch tree with a leaf.
 */
 hurt.util.setPatchTreeLeaf = function(state, zid, x, y, z, mxyz, patch_host_id, cb) {
   var patches = common.BuildPotentialPatchListFromXYZ(x, y, z, mxyz);
+  hurt.util.setPatchTreeLeafWithPatches(state, zid, patches, patch_host_id, cb);
+};
 
+hurt.util.setPatchTreeLeafWithPatches = function(state, zid, patches, patch_host_id, cb) {
   var ct = (new Date()).getTime() / 1000;
 
   function doit(x) {
@@ -76,6 +113,10 @@ hurt.util.setPatchTreeLeaf = function(state, zid, x, y, z, mxyz, patch_host_id, 
       'r'
     );
     trans.execute(function (t) {
+      if (t.results.r.err) {
+        console.log('[hurt.util.setPatchTreeLeaf] failed to set leaf; aborting despite dire consequences.', x, y, z, mxyz, patch_host_id);
+        return;
+      }
       if (x + 1 >= patches.length) {
         cb();
         return;
@@ -98,14 +139,7 @@ hurt.util.setPatchTreeLeaf = function(state, zid, x, y, z, mxyz, patch_host_id, 
 	@param(cb).note:      This may be executed sync or async.
 */
 hurt.util.checkPatchHosted = function (state, zid, x, y, z, mxyz, cb) {
-  function restart() {
-    hurt.util.ensurePatchHosted(state, zid, x, y, z, mxyz, cb);
-  }
-
-
-  //hurt.util.getPatchTreeLeaf = function(state, zid, x, y, z, mxyz, cb) 
-
-  hurt.util.getPatchTreeLeaf(state, zid, x, y, z, mxyz, function (patch_host_id) {
+  hurt.util.getPatchTreeLeaf(state, zid, x, y, z, mxyz, function (patch_host_id, patch) {
     if (patch_host_id == -1) {
       var trans = state.db.transaction();
       trans.add(
@@ -118,21 +152,31 @@ hurt.util.checkPatchHosted = function (state, zid, x, y, z, mxyz, cb) {
         var ct = (new Date()).getTime();
 
         if (row) {
-          cb(row.address, ct - row.lastalive);
+          cb(row.address, ct - row.lastalive, patch);
         } else {
-          cb(null, 999999, false);
+          cb(null, 999999, patch);
       });
     }  
   });
 }
 
-function hurt.util.ensureHostedByPatch(state, zid, x, y, z, mxyz, cb) {
-  hurt.util.checkPatchHosted(state, zid, x, y, z, mxyz, function (address, delta) {
+function hurt.util.ensureHostedByPatch(state, zid, x, y, z, mxyz, cb, delay, delaycb) {
+  hurt.util.checkPatchHosted(state, zid, x, y, z, mxyz, function (address, delta, patch) {
     if (delta > 60 * 4) {
-      /* Rehost it. */
-      
+      /* Rehost it at the highest avaliable level without overlapping anything existing. */
+      hurt.util.startPatchHosting(state, zid, [patch], function (success, address) {
+        /* We should have an address and a success code. */
+        cb(success, address);        
+      });      
       return;
     }
+    /* Delay, and try again. */
+    if (delaycb) {
+      delaycb();
+    }
+    setTimeout(function () {
+      hurt.util.ensureHostedByPatch(state, zid, x, y, z, mxyz, cb);
+    }, delay || 1000);
   });
 };
 
@@ -158,7 +202,10 @@ function hurt.util.startPatchHosting(state, zid, patches, cb) {
           }, null, function (msg) {
             if (msg.success) {
               console.log('zone is hosted');
-              cb(true, rows[x].address);
+              hurt.util.setPatchTreeLeafByPatches(state, zid, patches, patch_host_id, function (){
+                cb(true, rows[x].address);
+              });
+              return;
             } else {
               __find_slave(x + 1);
             }
@@ -306,33 +353,30 @@ hurt.masterindexstart = function (cfg) {
                 zstate = JSON.parse(zstate);
 
                 console.log('@@@zstate', zstate, zstate.mxyz);
-                hurt.util.ensurePatchHosted(
-                  state, zid,
-                  mstate.x, mstate.y, mstate.z,
-                  zstate.mxyz,
-                  function (isHosted, address) 
-                {
-                  if (isHosted) {
-                    console.log('ACCEPTED');
-                    ws.sendjson({
-                      subject:  'login-accepted',
-                      uid:      uid,
-                      mid:      mid,
-                    });
-                    ws.sendjson({
-                      subject:  'zone-change',
-                      zid:      zid,
-                      address:  address
-                    });
-                    return;
-                  }
+                hurt.util.ensureHostedByPatch(
+                    state, zid, mstate.x, mstate.y, mstate.z, zstate.mxyz,
+                    function (isHosted, address) {
+                      if (isHosted) {
+                        console.log('ACCEPTED');
+                          ws.sendjson({
+                            subject:  'login-accepted',
+                            uid:      uid,
+                            mid:      mid,
+                          });
+                          ws.sendjson({
+                            subject:  'zone-change',
+                            zid:      zid,
+                            address:  address
+                          });
+                        return;
+                      }
 
-                  console.log('REJECTED');
-                  ws.sendjson({
-                    subject: 'login-rejected',
-                    desc:    'Unable to get zone hosted your avatar machine is located in.'
-                  });
-                });
+                      console.log('REJECTED');
+                      ws.sendjson({
+                        subject: 'login-rejected',
+                        desc:    'Unable to get zone hosted your avatar machine is located in.'
+                      });
+                    });
 							}
 
 							/*

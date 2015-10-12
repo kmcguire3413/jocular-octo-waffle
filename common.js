@@ -41,6 +41,45 @@ common.BuildPotentialPatchListFromXYZ = function (x, y, z, mxyz, optimal, hard) 
   return out;
 }
 
+common.GetPatchesUpFromXYZD = function (patch, mxyz) {
+  var r = common.XYZDFromPatch(patch, mxyz);
+  var x = r[0], y = r[1], z = r[2], d = r[3];
+
+  var out = [];
+
+  for (; d > -1; --d) {
+    var r = common.PatchFromXYZD(x, y, z, mxyz, d);
+    var patch = r[0], branch_index = r[1];
+    out.push([patch, branch_index]);
+  }
+
+  return out;
+};
+
+common.XYZDFromPatch = function (patch, mxyz) {
+  var base = 0;
+  var depth;
+  for (depth = 0; depth < 9000; ++depth) {
+    var sect = Math.pow(8, depth);
+    if (base + sect > patch) {
+      break;
+    }
+    base += sect;;
+  }
+
+  --depth;
+
+  var divs = Math.pow(2, depth);
+  var i = patch - base;
+  var z = Math.floor(i / (divs * divs));
+  i -= z * (divs * divs);
+  var y = Math.floor(i / divs);
+  i -= y * divs;
+  var x = i;
+
+  return [x, y, z, depth];
+};
+
 /*
   (index, branch_index)
 */
