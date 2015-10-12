@@ -16,7 +16,26 @@ var slaveman = function () {
 	this.connecting = {};
 	this.requid = 100;
 	this.replycb = {};
-    return this;
+
+  var self = this;
+
+  /*
+    This provides timeout support for queued messages.
+  */
+  setTimeout(function () {
+    var ct = (new Date()).getTime();
+    for (var x = 0; x < self.queue.length; ++x) {
+      var qitem = self.queue[x];
+
+      if (ct - qitem.since > qitem.timeout) {
+        qitem.cb(null, false);
+        self.queue.splice(x, 1);
+        --x;
+      }
+    }
+  }, 5000);
+
+  return this;
 };
 
 module.exports = slaveman;
@@ -24,6 +43,8 @@ module.exports = slaveman;
 slaveman.prototype.updateAddress = function (sid, address) {
 	this.sidtoaddr[sid] = address;
 };
+
+// TODO: consider linked list instead of queue if performance is needed
 
 slaveman.prototype.process_queue = function () {
 	var self = this;
@@ -37,11 +58,14 @@ slaveman.prototype.process_queue = function () {
 
 		if (qitem.address in this.conn) {
 			qitem.msg.__rid = this.requid++;
-			this.replycb[qitem.msg.__rid] = qitem.rcb;
+			this.replycb[qitem.msg.__rid] = qitem.cb;
 			this.conn[qitem.address].send(JSON.stringify(qitem.msg));
-			if (qitem.cb) {
-				qitem.cb(true);
-			}
+      /*
+        Remove the queue item and adjust our index so we do
+        not skip the next item after this operation.
+      */
+      this.queue.splice(x, 1);
+      --x;
 			continue;
 		}
 
@@ -78,14 +102,14 @@ slaveman.prototype.process_queue = function () {
 					var rcb = self.replycb[msg.__rid];
 					delete self.replycb[msg.__rid];
 					if (rcb) {
-						rcb(msg);
+						rcb(msg, true);
 					}
 				}
 			});
 
 			client.on('error', function () {
 				if (cb) {
-					cb(false);
+					cb(null, false);
 				}
 				console.log('slaveman', 'error sending message to ' + this.__address);
 			});
@@ -96,7 +120,7 @@ slaveman.prototype.process_queue = function () {
 	}
 }
 
-slaveman.prototype.sendjson = function (sid, obj, cb, rcb) {
+slaveman.prototype.sendjson = function (sid, obj, cb, timeout) {
 	/*
 		(1) Do we have a connection existing already?
 		(2) Is the connection good?
@@ -109,7 +133,8 @@ slaveman.prototype.sendjson = function (sid, obj, cb, rcb) {
 		sid:            sid,
 		msg:            obj,
 		cb:             cb,
-		rcb:            rcb
+    timeout:        timeout,
+    since:          (new Date()).getTime(),
 	});
 	this.process_queue();
 };

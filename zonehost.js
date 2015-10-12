@@ -169,17 +169,20 @@ var zonehost = function (slavestate, zid, patch_host_id, cb) {
                     var x = 0;
                     function __disjoint_work1() {
                         while (x < rows.length) {
-                            var mstate = JSON.parse(rows[x].state);
-                            self.createMachineInstanceWithState(rows[x].mid, mstate, function () {
-                                /*
-                                    This might be a little intensive as everything is loaded
-                                    up so let us delay it a little.
-                                */
-                                process.nextTick(__disjoint_work1);
-                            });
-                            ++x;
-                            return;
+                          console.log('[zone-host] loading machine', rows[x].mid);
+                          var mstate = JSON.parse(rows[x].state);
+                          console.log('[zone-host] creating machine instance with state');
+                          self.createMachineInstanceWithState(rows[x].mid, mstate, function () {
+                              /*
+                                  This might be a little intensive as everything is loaded
+                                  up so let us delay it a little.
+                              */
+                              process.nextTick(__disjoint_work1);
+                          });
+                          ++x;
+                          return;
                         }
+                        console.log('done loading machines');
                         cb();
                     }
 
@@ -191,6 +194,9 @@ var zonehost = function (slavestate, zid, patch_host_id, cb) {
         loadAllMachines(function () {
             self.running = true;
 
+            if (!self.__pre_running_msg_queue) {
+              throw new Error('DBG');
+            }
             /*
                 We might have recieved some messages and if so they were queued. Now
                 that we are properly loaded we can easily handle them. Then we will
@@ -202,7 +208,7 @@ var zonehost = function (slavestate, zid, patch_host_id, cb) {
                 self.onMessage(self.__pre_running_msg_queue[x]);
             }
 
-            delete self.__pre_running_msg_queue;
+            self.__pre_running_msg_queue = null;
 
             /*
                 The heart that beats for the zone.
@@ -231,6 +237,7 @@ zonehost.prototype.tick = function () {
         var initial_position_updates = {};
         var machines = [];
         return [function (mach) {
+            console.log('[zone-host:tick] machine', mach.iid);
             if (mach.force[3] > 0.0) {
                 mach.x += mach.force[0] * mach.force[3];
                 mach.y += mach.force[0] * mach.force[3];
@@ -268,6 +275,7 @@ zonehost.prototype.tick = function () {
             machines.push(mach);
         },
         function () {
+            console.log('[zone-host:tick] second half');
             var entered = self.iid_enter;
             var left = self.iid_left;
             /*
@@ -277,17 +285,17 @@ zonehost.prototype.tick = function () {
                 var mach = machines[x];
                 var sock = mach.getAvatarSocket();
 
-                for (var x = 0; x < entered.length; ++x) {
+                for (var y = 0; y < entered.length; ++y) {
                     sock.sendjson({
                         subject:       'entity-entered',
-                        eid:           entered[x].id
+                        eid:           entered[y].id
                     });
                 }
 
-                for (var x = 0; x < left.length; ++x) {
+                for (var y = 0; y < left.length; ++y) {
                     sock.sendjson({
                         subject:       'entity-left',
-                        eid:           left[x].id
+                        eid:           left[y].id
                     });
                 }
 
@@ -318,6 +326,8 @@ zonehost.prototype.tick = function () {
             }
         }];
     });
+
+    console.log('[zone-host] tick done');
 };
 
 zonehost.prototype.ensureChunksLoadedForMachine = function (machine, cb) {
@@ -348,16 +358,17 @@ zonehost.prototype.ensureChunksLoadedForMachine = function (machine, cb) {
         while (ox < 2) {
             while (oy < 2) {
                 if (oz < 2) {
+                    console.log('[zone-host] ensuring chunk loaded', cx + ox, cy + oy, cz + oz);
                     self.ensureChunkLoaded(cx + ox, cy + oy, cz + oz, function (chunk) {
+                        ++oz;
                         __disjoint_work1();
                     });
-                    ++oz;
                     return;
                 }
-                oz = 0;
+                oz = -1;
                 ++oy;
             }
-            oy = 0;
+            oy = -1;
             ++ox;
         }
         cb();
@@ -383,7 +394,7 @@ zonehost.prototype.ensureChunkLoaded = function (cx, cy, cz, cb) {
         /*
             Try getting chunk from the database
         */
-
+        console.log('[ensureChunkLoaded] looking for chunk in database', cx, cy, cz);
         var self = this;
 
         var trans = this.db.transaction();
@@ -411,6 +422,7 @@ zonehost.prototype.ensureChunkLoaded = function (cx, cy, cz, cb) {
             c = self.chunks.get(cx, cy, cz);
             if (c) {
                 cb(c);
+                return;
             }
 
             if (results.length < 1) {
@@ -424,11 +436,14 @@ zonehost.prototype.ensureChunkLoaded = function (cx, cy, cz, cb) {
                 }
                 c = JSON.parse(buffer);
             }
-
+            console.log('[ensureChunkLoaded] placing chunk into local memory');
             self.chunks.put(cx, cy, cz, x);
             cb(c);
+            return;
         });
+        return;
     }
+    cb(c);
 };
 
 zonehost.prototype.generateChunk = function(cx, cy, cz) {
@@ -463,8 +478,10 @@ zonehost.prototype.updateAvatarForMachineWithInitialState = function (machine) {
 zonehost.prototype.createMachineInstanceWithState = function (mid, mstate, cb) {
     var machine = new Machine(this, mstate, mid);
     this.machines.addEntity(machine);
-
-    this.ensureChunksLoadedForMachine(machine, cb);
+    console.log('[zone-host] ensuring chunks loaded for machine', mid);
+    this.ensureChunksLoadedForMachine(machine, function () {
+      cb(true, machine);
+    });
 };
 
 zonehost.prototype.createMachineInstanceWithMID = function (mid, cb) {

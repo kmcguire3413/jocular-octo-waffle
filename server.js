@@ -160,54 +160,68 @@ hurt.util.setPatchTreeLeafWithPatches = function(state, zid, patches, patch_host
 */
 hurt.util.checkPatchHosted = function (state, zid, x, y, z, mxyz, cb) {
   hurt.util.getPatchTreeLeaf(state, zid, x, y, z, mxyz, function (patch_host_id, patch) {
-    if (patch_host_id == -1) {
-      var trans = state.db.transaction();
-      trans.add(
-        'SELECT address, lastalive, up FROM patch_host WHERE patch_host_id = ?', 
-        [patch_host_id],
-        'r'
-      );
-      trans.execute(function (t) {
-        var row = t.results.r.rows[0];
-        var ct = (new Date()).getTime();
-
-        if (row) {
-          /*
-            If it is _not_ up then consider it dead with same parameters.
-          */
-          if (!row.up[0]) {
-            // TODO: ... not sure if I am using that right since it is a BIT(?) field
-            cb(null, 999999, patch);
-            return;
-          }
-          cb(row.address, ct - row.lastalive, patch);
-        } else {
-          cb(null, 999999, patch);
+    var trans = state.db.transaction();
+    trans.add(
+      'SELECT slaveid, address, lastalive, up FROM patch_host WHERE patch_host_id = ?', 
+      [patch_host_id],
+      'r'
+    );
+    trans.execute(function (t) {
+      var row = t.results.r.rows[0];
+      var ct = (new Date()).getTime() / 1000;
+      if (row) {
+        /*
+          If it is _not_ up then consider it dead with same parameters.
+        */
+        if (!row.up[0]) {
+          // TODO: ... not sure if I am using that right since it is a BIT(?) field
+          cb(null, 999999, patch, null);
+          return;
         }
-        return;
-      });
-    }  
+        cb(row.address, ct - row.lastalive, patch, row.slaveid);
+      } else {
+        cb(null, 999999, patch, null);
+      }
+      return;
+    });  
   });
 }
 
 hurt.util.ensureHostedByPatch = function (state, zid, x, y, z, mxyz, cb, delay, delaycb) {
-  hurt.util.checkPatchHosted(state, zid, x, y, z, mxyz, function (address, delta, patch) {
-    if (delta > 60 * 4) {
+  hurt.util.checkPatchHosted(state, zid, x, y, z, mxyz, function (address, delta, patch, sid) {
+    if (delta > 60 * 4 || sid == null) {
       /* Rehost it at the highest avaliable level without overlapping anything existing. */
-      console.log('[ensureHostedByPatch]', {x: x, y: y, z: z, mxyz: mxyz, zid: zid, patch: patch});
-      hurt.util.startPatchHosting(state, zid, [patch], mxyz, function (success, address) {
-        /* We should have an address and a success code. */
-        cb(success, address);        
-      });      
+      function __hostit() {
+        console.log('[ensureHostedByPatch]', {x: x, y: y, z: z, mxyz: mxyz, zid: zid, patch: patch});
+        hurt.util.startPatchHosting(state, zid, [patch], mxyz, function (success, address) {
+          /* We should have an address and a success code. */
+          cb(success, address, sid);        
+         });
+      }
+      __hostit();      
       return;
     }
-    /* Delay, and try again. */
-    if (delaycb) {
-      delaycb();
-    }
-    setTimeout(function () {
-      hurt.util.ensureHostedByPatch(state, zid, x, y, z, mxyz, cb);
-    }, delay || 1000);
+
+    /* Try to send a message to the slave and check if this is actually up and alive. */
+    hurt.slaveman.sendjson(sid, {
+      subject:        'ping',
+    }, function (msg, success) {
+      /*
+        Either the message failed to deliver, or the actual zone-host
+        was not up.
+
+        TODO: improve the information returned and the decision making process
+      */
+      if (!success || !msg.up) {
+        /*
+          We can consider it dead.
+        */
+        __hostit();
+        return;
+      }
+      cb(true, address, sid);
+    }, 5000); // TODO: think about making this a longer amount of time
+              // TODO: this is a site of potential problems
   });
 };
 
@@ -251,37 +265,44 @@ hurt.util.startPatchHostingWithPatchHostID = function (state, zid, patches, mxyz
             We need to request that the slave host this zone,
             and also get validation that the zone is hosted.
           */
+
+          function __inner0(row) {
+            return function (msg) {
+              if (msg.success) {
+                console.log('zone is hosted');
+                hurt.util.setPatchTreeLeafByPatches(state, zid, patches, mxyz, patch_host_id, function () {
+                  var trans = state.db.transaction();
+                  /*
+                    Now update the patch host record so everyone knows that it is online and ready.
+                  */
+                  trans.add(
+                    'UPDATE patch_host SET slaveid = ?, address = ?, lastalive = ?, up = ?  WHERE patch_host_id = ?',
+                    [row.sid, row.address, (new Date()).getTime(), 1, patch_host_id],
+                    'r'
+                  );
+                  trans.execute(function (t) {
+                    if (t.results.r.err) {
+                      cb(false);
+                      return;
+                    }
+                    cb(true, row.address, row.sid);
+                  });
+                });
+                return;
+              } else {
+                __find_slave(x + 1);
+              }
+            };
+          }
+
+
           hurt.slaveman.updateAddress(rows[x].sid, rows[x].address);
+          console.log('[index-server] requesting slave to host zone-patch', rows[x].address, patch_host_id);
           hurt.slaveman.sendjson(rows[x].sid, {
             subject:        'host-zone-request',
             zid:            zid,
             patch_host_id:  patch_host_id,
-          }, null, function (msg) {
-            if (msg.success) {
-              console.log('zone is hosted');
-              hurt.util.setPatchTreeLeafByPatches(state, zid, patches, mxyz, patch_host_id, function () {
-                var trans = state.db.transaction();
-                /*
-                  Now update the patch host record so everyone knows that it is online and ready.
-                */
-                trans.add(
-                  'UPDATE patch_host SET address = ?, lastalive = ?, up = ?  WHERE patch_host_id = ?',
-                  [rows[x].address, (new Date()).getTime(), 1, patch_host_id],
-                  'r'
-                );
-                trans.execute(function (t) {
-                  if (t.results.r.err) {
-                    cb(false);
-                    return;
-                  }
-                  cb(true, rows[x].address);
-                });
-              });
-              return;
-            } else {
-              __find_slave(x + 1);
-            }
-          });
+          }, null, __inner0(rows[x])); 
           return;
         }
       }
@@ -405,6 +426,7 @@ hurt.masterindexstart = function (cfg) {
 
 				switch (msg.subject) {
 					case 'login':
+            debugger;
 						var user = msg.user;
 						var passhash = msg.passhash;
 						/*
@@ -421,25 +443,38 @@ hurt.masterindexstart = function (cfg) {
                   and wait until it is ready for connections. Then we need to
                   direct the client to connect to this zone instance.
                 */
+                console.log('mstate', mstate);
                 mstate = JSON.parse(mstate);
                 zstate = JSON.parse(zstate);
 
                 console.log('@@@zstate', zstate, zstate.mxyz);
                 hurt.util.ensureHostedByPatch(
                     state, zid, mstate.x, mstate.y, mstate.z, zstate.mxyz,
-                    function (isHosted, address) {
+                    function (isHosted, address, sid) {
                       if (isHosted) {
                         console.log('ACCEPTED');
-                          ws.sendjson({
-                            subject:  'login-accepted',
-                            uid:      uid,
-                            mid:      mid,
-                          });
-                          ws.sendjson({
-                            subject:  'zone-change',
-                            zid:      zid,
-                            address:  address
-                          });
+                        ws.sendjson({
+                          subject:  'login-accepted',
+                          uid:      uid,
+                          mid:      mid,
+                        });
+                        ws.sendjson({
+                          subject:  'zone-change',
+                          zid:      zid,
+                          address:  address
+                        });
+                        /*
+                          This machine may already been loaded, but let us
+                          send this command to ensure that it is loaded. If
+                          the machine is already loaded it will just fail.
+                        */
+                        console.log('sid', sid);
+                        hurt.slaveman.sendjson(sid, {
+                          subject:        'create-machine-instance',
+                          zid:            zid,
+                          mid:            mid,
+                          recreate:       false,
+                        }); 
                         return;
                       }
 
@@ -503,7 +538,8 @@ hurt.masterindexstart = function (cfg) {
 									energy_stored:     100.0,
 									x:                 0.0,
 									y:                 0.0,
-									z:           	   0.0
+									z:           	     0.0,
+                  __create_instance: true,
 								};
 
 								var trans = db.transaction();
