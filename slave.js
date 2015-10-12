@@ -201,9 +201,7 @@ var slave = function (cfg) {
               TODO: I am just going to host anything request for
                     now.
             */
-            var zid = msg.zid;
-            var patches = msg.patches;
-            state.zhosts[zid] = new zonehost(state, zid, patches, function () {
+            state.zhosts[zid] = new zonehost(state, msg.zid, msg.patch_zone_host, function () {
 	  				  msg.$sendjsonreply({
 		  				  success:        true
 						  });

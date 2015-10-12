@@ -28,13 +28,23 @@ var hurt = {
   the coordinates that is unused or used, or both.
 */
 hurt.util.getPatchTreeLeaf = function(state, zid, x, y, z, mxyz, cb) {
-  var patches = common.BuildPotentialPatchListFromXYZ(x, y, z, mxyz);
+  var patches = common.buildPatchListFromXYZ(x, y, z, mxyz);
+  console.log('[getPatchTreeLeaf]', {
+    x: x,
+    y: y,
+    z: z,
+    mxyz: mxyz,
+    patches: patches,
+  });
   hurt.util.getPatchTreeLeafWithPatches(state, zid, patches, cb);
 };
 
 hurt.util.getPatchTreeLeafWithPatches = function (state, zid, patches, cb) {
-  
   var tmp = [];
+
+  if (patches.length == 0 || patches == undefined || patches == null) {
+    throw new Error('patches was empty, null, or undefined');
+  }
 
   for (var x = 0; x < patches.length; ++x) {
     tmp.push(patches[x][0]);
@@ -50,12 +60,12 @@ hurt.util.getPatchTreeLeafWithPatches = function (state, zid, patches, cb) {
   trans.execute(function (t) {
     var rows = t.results.r.rows;
     for (var x = 0; x < rows.length; ++x) {
-      if (rows[x].patch_host_id > -1 || up == 0) {
+      if (rows[x].patch_host_id > -1 || rows[x].up[0] == 0) {
         cb(rows[x].patch_host_id, rows[x].patch);
         return;
       }
     }
-    cb(-1);
+    cb(-1, 0);
   });
 };
 
@@ -65,10 +75,13 @@ hurt.util.getPatchTreeLeafWithPatches = function (state, zid, patches, cb) {
   patches for each entity so we allocate as large of a patch as possible.
 */
 hurt.util.setPatchTreeLeafByPatches = function(state, zid, patches, mxyz, patch_host_id, cb) {
+  console.log('[setPatchTreeLeafByPatches]', patches, patch_host_id);
   function doit(i) {
+    console.log('[setPatchTreeLeafByPatches]', { patch: patches[i] });
     var up = common.getPatchesUpFromXYZD(patches[i], mxyz);
     up.reverse();
-    var r = common.getPatchTreeLeafWithPatches(state, zid, up, function(patch_host_id, highest_patch_unused) {
+    console.log('[setPatchTreeLeafByPatches]', { up: up });
+    var r = hurt.util.getPatchTreeLeafWithPatches(state, zid, up, function(_, highest_patch_unused) {
       for (var x = 0; x < up.length; ++x) {
         if (up[x][0] == highest_patch_unused) {
           up = up.slice(0, x + 1);
@@ -97,6 +110,12 @@ hurt.util.setPatchTreeLeaf = function(state, zid, x, y, z, mxyz, patch_host_id, 
 hurt.util.setPatchTreeLeafWithPatches = function(state, zid, patches, patch_host_id, cb) {
   var ct = (new Date()).getTime() / 1000;
 
+  if (patch_host_id != 0 && (!patch_host_id || patch_host_id < 0)) {
+    throw new Error('patch_host_id is invalid');
+  }
+
+  console.log('setPatchTreeLeafWithPatches', patches, patch_host_id);
+
   function doit(x) {
     var cur = patches[x];
     var leaf;
@@ -105,6 +124,7 @@ hurt.util.setPatchTreeLeafWithPatches = function(state, zid, patches, patch_host
     } else {
       leaf = -1;
     }
+    console.log('leaf', x, patches.length, leaf, cur[0]);
     var trans = state.db.transaction();
     trans.add(
       'INSERT INTO patch_tree (zid, patch, up, last_update, patch_host_id) VALUES (?, ?, ?, ?, ?) ' +
@@ -143,7 +163,7 @@ hurt.util.checkPatchHosted = function (state, zid, x, y, z, mxyz, cb) {
     if (patch_host_id == -1) {
       var trans = state.db.transaction();
       trans.add(
-        'SELECT address, lastalive FROM patch_host WHERE patch_host_id = ?', 
+        'SELECT address, lastalive, up FROM patch_host WHERE patch_host_id = ?', 
         [patch_host_id],
         'r'
       );
@@ -152,19 +172,30 @@ hurt.util.checkPatchHosted = function (state, zid, x, y, z, mxyz, cb) {
         var ct = (new Date()).getTime();
 
         if (row) {
+          /*
+            If it is _not_ up then consider it dead with same parameters.
+          */
+          if (!row.up[0]) {
+            // TODO: ... not sure if I am using that right since it is a BIT(?) field
+            cb(null, 999999, patch);
+            return;
+          }
           cb(row.address, ct - row.lastalive, patch);
         } else {
           cb(null, 999999, patch);
+        }
+        return;
       });
     }  
   });
 }
 
-function hurt.util.ensureHostedByPatch(state, zid, x, y, z, mxyz, cb, delay, delaycb) {
+hurt.util.ensureHostedByPatch = function (state, zid, x, y, z, mxyz, cb, delay, delaycb) {
   hurt.util.checkPatchHosted(state, zid, x, y, z, mxyz, function (address, delta, patch) {
     if (delta > 60 * 4) {
       /* Rehost it at the highest avaliable level without overlapping anything existing. */
-      hurt.util.startPatchHosting(state, zid, [patch], function (success, address) {
+      console.log('[ensureHostedByPatch]', {x: x, y: y, z: z, mxyz: mxyz, zid: zid, patch: patch});
+      hurt.util.startPatchHosting(state, zid, [patch], mxyz, function (success, address) {
         /* We should have an address and a success code. */
         cb(success, address);        
       });      
@@ -180,12 +211,38 @@ function hurt.util.ensureHostedByPatch(state, zid, x, y, z, mxyz, cb, delay, del
   });
 };
 
-function hurt.util.startPatchHosting(state, zid, patches, cb) {
+hurt.util.startPatchHosting = function (state, zid, patches, mxyz, cb) {
+  console.log('startPatchHosting', {
+    zid:     zid,
+    patches: patches,
+  });
+  var trans = state.db.transaction();
+  trans.add(
+      'INSERT INTO patch_host (zid, address, lastalive, up, locked, state) VALUES (?, ?, ?, ?, ?, ?)',
+      [zid, null, null, 0, 0, ''],
+      'r'
+  );
+  trans.add('SELECT LAST_INSERT_ID() as patch_host_id', [], 'phi');
+  trans.execute(function (t) {
+    if (t.results.r.err) {
+      t.rollback();
+      cb(false);
+      return;
+    }
+    t.commit();
+
+    var phi = t.results.phi.rows[0].patch_host_id;
+    console.log('[startPatchHosting]', { patch_host_id: phi });
+    hurt.util.startPatchHostingWithPatchHostID(state, zid, patches, mxyz, phi, cb);
+  });
+};
+
+hurt.util.startPatchHostingWithPatchHostID = function (state, zid, patches, mxyz, patch_host_id, cb) {
   var trans = state.db.transaction();
   trans.add('SELECT up, locked, address, sid FROM slaves', [], 'r');
   trans.execute(function (t) {
     var rows = t.results.r.rows;
-    console.log('looking for slave to host zone ' + zid);
+    console.log('looking for slave to host zone patches', zid, patch_host_id, patches);
     console.log(rows);
     function __find_slave(x) {
       for (; x < rows.length; ++x) {
@@ -202,8 +259,23 @@ function hurt.util.startPatchHosting(state, zid, patches, cb) {
           }, null, function (msg) {
             if (msg.success) {
               console.log('zone is hosted');
-              hurt.util.setPatchTreeLeafByPatches(state, zid, patches, patch_host_id, function (){
-                cb(true, rows[x].address);
+              hurt.util.setPatchTreeLeafByPatches(state, zid, patches, mxyz, patch_host_id, function () {
+                var trans = state.db.transaction();
+                /*
+                  Now update the patch host record so everyone knows that it is online and ready.
+                */
+                trans.add(
+                  'UPDATE patch_host SET address = ?, lastalive = ?, up = ?  WHERE patch_host_id = ?',
+                  [rows[x].address, (new Date()).getTime(), 1, patch_host_id],
+                  'r'
+                );
+                trans.execute(function (t) {
+                  if (t.results.r.err) {
+                    cb(false);
+                    return;
+                  }
+                  cb(true, rows[x].address);
+                });
               });
               return;
             } else {

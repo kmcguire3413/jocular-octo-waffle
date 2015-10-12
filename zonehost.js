@@ -103,6 +103,7 @@ var zonehost = function (slavestate, zid, patch_host_id, cb) {
     self.__pre_running_msg_queue = [];
 
     var trans = db.transaction();
+    console.log('[zone-host] looking for zone and patch_host', zid, patch_host_id);
     trans.add('SELECT state FROM zones WHERE zid = ?', [zid], 'a');
     trans.add('SELECT state FROM patch_host WHERE patch_host_id = ?', [patch_host_id], 'b');
     trans.execute(function (t) {

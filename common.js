@@ -22,7 +22,7 @@ var common = {};
   exceeding this.
 */
 
-common.BuildPotentialPatchListFromXYZ = function (x, y, z, mxyz, optimal, hard) {
+common.buildPatchListFromXYZ = function (x, y, z, mxyz, optimal, hard) {
   optimal = optimal || 16384;
   hard = hard || 32;
 
@@ -34,21 +34,28 @@ common.BuildPotentialPatchListFromXYZ = function (x, y, z, mxyz, optimal, hard) 
       (depth < hard) && 
       (mxyz / Math.pow(2, depth) > optimal)
   ) {
-    out.push(common.PatchFromXYZD(x, y, z, mxyz, depth));
+    console.log('@', depth);
+    out.push(common.getPatchFromXYZD(x, y, z, mxyz, depth));
     ++depth;
   }
 
   return out;
 }
 
-common.GetPatchesUpFromXYZD = function (patch, mxyz) {
+common.getPatchesUpFromXYZD = function (patch, mxyz) {
+  if (patch == null || patch == undefined) {
+    throw new Error('The patch was a equiv to false.');
+  }
+
   var r = common.XYZDFromPatch(patch, mxyz);
   var x = r[0], y = r[1], z = r[2], d = r[3];
 
   var out = [];
 
+  console.log('!!', patch, x, y, z, d);
+
   for (; d > -1; --d) {
-    var r = common.PatchFromXYZD(x, y, z, mxyz, d);
+    var r = common.getPatchFromXYZD(x, y, z, mxyz, d);
     var patch = r[0], branch_index = r[1];
     out.push([patch, branch_index]);
   }
@@ -64,10 +71,8 @@ common.XYZDFromPatch = function (patch, mxyz) {
     if (base + sect > patch) {
       break;
     }
-    base += sect;;
+    base += sect;
   }
-
-  --depth;
 
   var divs = Math.pow(2, depth);
   var i = patch - base;
@@ -83,10 +88,14 @@ common.XYZDFromPatch = function (patch, mxyz) {
 /*
   (index, branch_index)
 */
-common.PatchFromXYZD = function (x, y, z, mxyz, depth) {
+common.getPatchFromXYZD = function (x, y, z, mxyz, depth) {
   //x = x / Math.pow(2, depth);
   //y = y / Math.pow(2, depth);
   //z = z / Math.pow(2, depth);
+
+  if (isNaN(x)) {
+    throw new Error('[getPatchFromXYZ] DEBUG ERROR: Had NaN');
+  }
 
   /* How many coordinate units make up a patch unit at this depth. */
   var divs = Math.pow(2, depth);
@@ -99,17 +108,19 @@ common.PatchFromXYZD = function (x, y, z, mxyz, depth) {
   //
   //  divs = 2^0
   //  mxyz / divs = 100
-  //  100 / 100 = 1 (0)
+  //  99 / 100 = 0
   //  
   //  100 / 2^1 = 50
-  //  100 / 50 = 2 (1)
+  //  99 / 50 = 1
   //
   //  100 / 2^2 = 25
-  //  100 / 25 = 4 (3)
+  //  99 / 25 = 3
   
-  var px = Math.floor(x / pupu) - 1;
-  var py = Math.floor(y / pupu) - 1;
-  var pz = Math.floor(z / pupu) - 1;
+  var px = Math.floor(x / pupu);
+  var py = Math.floor(y / pupu);
+  var pz = Math.floor(z / pupu);
+
+  console.log('$', divs, pupu, px, x, y, z);
 
   var sx;
   var sy;
