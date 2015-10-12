@@ -205,6 +205,7 @@ hurt.util.ensureHostedByPatch = function (state, zid, x, y, z, mxyz, cb, delay, 
     /* Try to send a message to the slave and check if this is actually up and alive. */
     hurt.slaveman.sendjson(sid, {
       subject:        'ping',
+      zid:            zid,
     }, function (msg, success) {
       /*
         Either the message failed to deliver, or the actual zone-host
@@ -212,7 +213,7 @@ hurt.util.ensureHostedByPatch = function (state, zid, x, y, z, mxyz, cb, delay, 
 
         TODO: improve the information returned and the decision making process
       */
-      if (!success || !msg.up) {
+      if (!success || !msg.zoneup) {
         /*
           We can consider it dead.
         */
@@ -268,7 +269,7 @@ hurt.util.startPatchHostingWithPatchHostID = function (state, zid, patches, mxyz
 
           function __inner0(row) {
             return function (msg) {
-              if (msg.success) {
+              if (msg && msg.success) {
                 console.log('zone is hosted');
                 hurt.util.setPatchTreeLeafByPatches(state, zid, patches, mxyz, patch_host_id, function () {
                   var trans = state.db.transaction();
@@ -302,7 +303,7 @@ hurt.util.startPatchHostingWithPatchHostID = function (state, zid, patches, mxyz
             subject:        'host-zone-request',
             zid:            zid,
             patch_host_id:  patch_host_id,
-          }, null, __inner0(rows[x])); 
+          }, __inner0(rows[x])); 
           return;
         }
       }
@@ -426,7 +427,6 @@ hurt.masterindexstart = function (cfg) {
 
 				switch (msg.subject) {
 					case 'login':
-            debugger;
 						var user = msg.user;
 						var passhash = msg.passhash;
 						/*

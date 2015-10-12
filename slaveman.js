@@ -126,6 +126,12 @@ slaveman.prototype.sendjson = function (sid, obj, cb, timeout) {
 		(2) Is the connection good?
 	*/
 	var address = this.sidtoaddr[sid];
+
+  if (address == undefined) {
+    cb(null, false);
+    return;
+  }
+
 	var conn = this.conn[address];
 
 	this.queue.push({

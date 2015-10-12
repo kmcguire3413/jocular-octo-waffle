@@ -154,6 +154,10 @@ var slave = function (cfg) {
                 updates for what happens to it and around it.
             */
             mach.attachAvatarSocket(ws);
+
+            ws.sendjson({
+              subject:    'login-accepted',
+            });
 						break;
           case 'ping':
             var zid = msg.zid;
@@ -233,7 +237,7 @@ var slave = function (cfg) {
                     now.
             */
             console.log('[slave] got zone-host request; booting zone-host', zid);
-            state.zhosts[zid] = new zonehost(state, msg.zid, msg.patch_host_id, function () {
+            state.zhosts[msg.zid] = new zonehost(state, msg.zid, msg.patch_host_id, function () {
 	  				  msg.$sendjsonreply({
 		  				  success:        true
 						  });

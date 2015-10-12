@@ -97,10 +97,25 @@ var zonehost = function (slavestate, zid, patch_host_id, cb) {
 
     this.db = db;
     this.zid = zid;
+    this.running = false;
+    this.__pre_running_msg_queue = [];
 
-    self.running = false;
+    /*
+      This needs to return as soon as possible so we can queue
+      messages while we boot up. Also, once we call the callback
+      it is expected that we have registered ourselves fully so
+      that clients that connect to the slave can talk to us.
+    */
+    process.nextTick(function () {
+      self.__asyncload(slavestate, zid, patch_host_id, cb);
+    });
 
-    self.__pre_running_msg_queue = [];
+    return this;
+};
+
+zonehost.prototype.__asyncload = function (slavestate, zid, patch_host_id, cb) {
+    var self = this;
+    var db = this.db;
 
     var trans = db.transaction();
     console.log('[zone-host] looking for zone and patch_host', zid, patch_host_id);
@@ -237,6 +252,7 @@ zonehost.prototype.tick = function () {
         var initial_position_updates = {};
         var machines = [];
         return [function (mach) {
+            mach.iid = iid;
             console.log('[zone-host:tick] machine', mach.iid);
             if (mach.force[3] > 0.0) {
                 mach.x += mach.force[0] * mach.force[3];
@@ -249,9 +265,11 @@ zonehost.prototype.tick = function () {
                 /*
                     Update anyone in this zone.
                 */
-                position_updates[mach.id] = [mach.id, mach.x, mach.y, mach.z];
+                position_updates[mach.iid] = position_updates[mach.iid] || {};
+                position_updates[mach.iid][mach.id] = [mach.id, mach.x, mach.y, mach.z];
             } else {
-                initial_position_updates[mach.id] = [mach.id, mach.x, mach.y, mach.z];
+                initial_position_updates[mach.iid] = initial_position_updates[mach.iid] || {};
+                initial_position_updates[mach.iid][mach.id] = [mach.id, mach.x, mach.y, mach.z];
             }
 
             if (iid != mach.iid) {
@@ -276,8 +294,6 @@ zonehost.prototype.tick = function () {
         },
         function () {
             console.log('[zone-host:tick] second half');
-            var entered = self.iid_enter;
-            var left = self.iid_left;
             /*
                 This is called before the next interaction zone is processed.
             */
@@ -285,14 +301,21 @@ zonehost.prototype.tick = function () {
                 var mach = machines[x];
                 var sock = mach.getAvatarSocket();
 
-                for (var y = 0; y < entered.length; ++y) {
+                if (!sock) {
+                  continue;
+                }
+
+                var entered = self.iid_enter[mach.iid] || {};
+                var left = self.iid_left[mach.iid] || {};
+
+                for (var y in entered) {
                     sock.sendjson({
                         subject:       'entity-entered',
                         eid:           entered[y].id
                     });
                 }
 
-                for (var y = 0; y < left.length; ++y) {
+                for (var y in left) {
                     sock.sendjson({
                         subject:       'entity-left',
                         eid:           left[y].id
@@ -300,29 +323,29 @@ zonehost.prototype.tick = function () {
                 }
 
                 if (mach.last_iid != iid) {
-                    for (var y = 0; y < initial_position_updates.length; ++y) {
+                    var t = initial_position_updates[mach.iid];
+                    for (var y in t) {
                         sock.sendjson({
                             subject:        'entity-absolute-position-update',
-                            eid:            initial_position_updates[y][0],
-                            x:              initial_position_updates[y][1],
-                            y:              initial_position_updates[y][2],
-                            z:              initial_position_updates[y][3]
+                            eid:            t[y][0],
+                            x:              t[y][1],
+                            y:              t[y][2],
+                            z:              t[y][3]
                         });
                     }
                     mach.hasAllUpdates = true;
                 }
 
-                for (var y = 0; y < position_updates.length; ++y) {
+                var t = position_updates[mach.iid];
+                for (var y in t) {
                     sock.sendjson({
                         subject:   'entity-absolute-position-update',
-                        eid:       position_updates[y][0],
-                        x:         position_updates[y][1],
-                        y:         position_updates[y][2],
-                        z:         position_updates[y][3]
+                        eid:       t[y][0],
+                        x:         t[y][1],
+                        y:         t[y][2],
+                        z:         t[y][3]
                     });
                 }
-
-                mach.iid = iid;
             }
         }];
     });
@@ -437,7 +460,7 @@ zonehost.prototype.ensureChunkLoaded = function (cx, cy, cz, cb) {
                 c = JSON.parse(buffer);
             }
             console.log('[ensureChunkLoaded] placing chunk into local memory');
-            self.chunks.put(cx, cy, cz, x);
+            self.chunks.put(cx, cy, cz, c);
             cb(c);
             return;
         });
@@ -511,7 +534,7 @@ zonehost.prototype.createMachineInstanceWithMID = function (mid, cb) {
 };
 
 zonehost.prototype.getMachineByID = function (mid) {
-    return this.machines[mid];
+    return this.machines.getByID(mid);
 };
 
 zonehost.prototype.onMessage = function (msg) {
